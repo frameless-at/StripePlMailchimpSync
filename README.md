@@ -1,4 +1,4 @@
-# SPL Mailchimp Sync
+# StripePaymentLinks Mailchimp Sync
 
 **Minimal add-on module for ProcessWire + StripePaymentLinks**  
 Synchronizes purchases to Mailchimp automatically.
