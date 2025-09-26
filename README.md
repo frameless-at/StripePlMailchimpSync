@@ -5,7 +5,7 @@ Synchronizes purchases to Mailchimp automatically.
 
 ## Features
 
-- Hooks into `repeater_spl_purchases` (created by StripePaymentLinks).
+- Hooks into repeater field `spl_purchases` (created by StripePaymentLinks).
 - Syncs customer data (email, first name, last name) to Mailchimp.
 - Adds product titles (from Stripe line items or purchase_lines) as Mailchimp tags.
 - Configurable in ProcessWire module settings:
