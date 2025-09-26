@@ -118,10 +118,11 @@ class StripePlMailchimpSync extends WireData implements Module, ConfigurableModu
 	  $email = (string) $user->email;
 	  if($email === '') return;
 
-	  // Prefer explicit user fields; otherwise split from full title
-	  $parts = $this->splitFullNameSmart((string) $user->title);
-	  $first = (string)($user->user_name ?: $parts['first']);
-	  $last  = (string)($user->user_surname ?: $parts['last']);
+	  $full  = trim((string) $user->title);
+	  if ($full === '' && strpos($email, '@') !== false) $full = substr($email, 0, strpos($email, '@'));
+	  $parts = $this->splitFullNameSmart($full);
+	  $first = (string) $parts['first'];
+	  $last  = (string) $parts['last'];
 
 	  // Collect product names as tags
 	  $tags = $this->purchaseTagsFromItem($item);
