@@ -16,9 +16,7 @@ Synchronizes purchases to Mailchimp automatically.
 
 ## Requirements
 
-- ProcessWire 3.x
 - [StripePaymentLinks](https://github.com/frameless-at/StripePaymentLinks) module installed and configured
-- Mailchimp API key and Audience ID
 
 ## Installation
 
