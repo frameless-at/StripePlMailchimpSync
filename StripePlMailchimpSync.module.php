@@ -46,8 +46,15 @@ class StripePlMailchimpSync extends WireData implements Module, ConfigurableModu
    * - Register our hook that fires once when a purchase item is created
    */
   public function init(): void {
-	// Only fire once when a new purchase repeater item is created
-	$this->addHookAfter('Pages::added', $this, 'afterPurchaseAdded');
+	$this->addHookAfter('Pages::saved', $this, 'afterPurchaseAdded');
+	
+	$this->addHookAfter('Modules::saveConfig', function($e){
+		$m    = $e->arguments(0);
+		$data = (array) $e->arguments(1);
+		$name = $m instanceof \ProcessWire\Module ? $m->className() : (string) $m;
+		if ($name !== 'StripePlMailchimpSync') return;
+		$this->triggerResyncFromConfig($data);
+	  });
   }
 
   /**
@@ -80,9 +87,132 @@ class StripePlMailchimpSync extends WireData implements Module, ConfigurableModu
 	$f->checked = !empty($data['createIfMissing']);
 	$inputfields->add($f);
 
+    $fs = $this->modules->get('InputfieldFieldset');
+  	$fs->label = 'Mailchimp Resync';
+	  	
+  	$f = $this->modules->get('InputfieldDatetime');
+  	$f->attr('name', 'resyncFrom');
+  	$f->label = 'From purchase date (optional)';
+  	$f->datepicker = 1;
+  	$f->timepicker = 0;
+  	$f->attr('placeholder', 'YYYY-MM-DD');
+  	$f->columnWidth = 50;
+  	$fs->add($f);
+  	
+  	$f = $this->modules->get('InputfieldDatetime');
+  	$f->attr('name', 'resyncTo');
+  	$f->label = 'To purchase date (optional)';
+  	$f->datepicker = 1;
+  	$f->timepicker = 0;
+  	$f->attr('placeholder', 'YYYY-MM-DD');
+  	$f->columnWidth = 50;
+  	$fs->add($f);
+	
+  	$f = $this->modules->get('InputfieldCheckbox');
+  	$f->attr('name', 'resyncUnsyncedOnly');
+  	$f->label = 'Only items without mc_synced_at';
+  	$f->checked = !empty($data['resyncUnsyncedOnly']);
+    $f->columnWidth = 50;
+  	$fs->add($f);
+	
+  	$f = $this->modules->get('InputfieldCheckbox');
+	$f->columnWidth = 50;
+  	$f->attr('name', 'resyncDryRun');
+  	$f->label = 'Dry-run (log only, no Mailchimp calls)';
+  	$fs->add($f);
+	
+  	$f = $this->modules->get('InputfieldCheckbox');
+  	$f->attr('name', 'resyncRun');
+  	$f->label = 'Run resync now';
+  	$fs->add($f);
+	  $report = $this->wire('session')->get('spl_mailchimp_resync_report');
+	  if ($report) {
+		$out = $this->modules->get('InputfieldMarkup');
+		$out->name  = 'resyncReport';
+		$out->label = 'Resync report';
+		$out->value = '<pre style="white-space:pre-wrap;max-height:400px;overflow:auto;margin:0">' 
+					. htmlspecialchars((string)$report, ENT_QUOTES, 'UTF-8')
+					. '</pre>';
+		$fs->add($out);
+		$this->wire('session')->remove('spl_mailchimp_resync_report');
+	  }
+  	$inputfields->add($fs);
+	  
 	return $inputfields;
   }
 
+private function parseDateYmd($s): ?int {
+	  if ($s === null) return null;
+	  if (is_int($s)) return $s;
+	  $s = trim((string)$s);
+	  if ($s === '') return null;
+	  $ts = strtotime($s);
+	  return $ts !== false ? $ts : null;
+  }
+    
+protected function triggerResyncFromConfig(array $data): void {
+	if (empty($data['resyncRun'])) return;
+  
+	$unsyncedOnly = filter_var($data['resyncUnsyncedOnly'] ?? false, FILTER_VALIDATE_BOOLEAN);
+	$dryRun       = filter_var($data['resyncDryRun']       ?? false, FILTER_VALIDATE_BOOLEAN);
+  
+	//$from = $this->parseDateYmd($data['resyncFrom'] ?? null);
+	//$to   = $this->parseDateYmd($data['resyncTo']   ?? null);
+	$from = (int) ($data['resyncFrom'] ?? 0) ?: null;
+	$to   = (int) ($data['resyncTo']   ?? 0) ?: null;
+	if ($to !== null) $to += 86399;
+  
+	$pages = $this->wire('pages');
+	$sel = "template=repeater_spl_purchases, limit=1000";
+
+	if ($from) $sel .= ", purchase_date|created>={$from}";
+	if ($to)   $sel .= ", purchase_date|created<={$to}";
+  
+	$items = $pages->find($sel);
+  
+	// Debug visibility
+	$this->wire('log')->save('spl_mailchimp', "resync: found {$items->count()} items for selector: {$sel}");
+  
+	$synced = 0; $skipped = 0; $errors = 0; $wouldSync = 0;
+  
+	foreach ($items as $it) {
+	  /** @var Page $it */
+	  $already = (bool) $it->meta('mc_synced_at');
+  
+	  if ($dryRun) {
+		// Count what WOULD be synced given current flags
+		if ($unsyncedOnly && $already) {
+		  $skipped++;
+		} else {
+		  $wouldSync++;
+		  $this->wire('log')->save('spl_mailchimp', "[dry-run] would sync item #{$it->id}");
+		}
+		continue;
+	  }
+  
+	  if ($unsyncedOnly && $already) { $skipped++; continue; }
+  
+	  try {
+		$this->syncPurchaseToMailchimp($it);
+		$synced++;
+	  } catch (\Throwable $e) {
+		$errors++;
+		$this->wire('log')->save('spl_mailchimp', "[resync error] item #{$it->id}: " . $e->getMessage());
+	  }
+	}
+  
+  	$fmt = fn($ts) => $ts ? date('Y-m-d H:i:s', $ts) . ' (' . $ts . ')' : '-';
+	
+	$this->wire('session')->set('spl_mailchimp_resync_report', sprintf(
+	  "Resync finished: synced=%d, skipped=%d, errors=%d, wouldSync=%d (from=%s, to=%s, unsyncedOnly=%s, dryRun=%s)",
+	  $synced, $skipped, $errors, $wouldSync,
+	  $fmt($from), $fmt($to),
+	  $unsyncedOnly ? 'on':'off', $dryRun ? 'on':'off'
+	));
+	
+	$data['resyncRun'] = false;
+	$this->modules->saveConfig('StripePlMailchimpSync', $data);
+  }
   /**
    * Hook callback: runs after a page was added.
    * We only act on repeater items with template 'repeater_spl_purchases'.
@@ -94,9 +224,10 @@ class StripePlMailchimpSync extends WireData implements Module, ConfigurableModu
 	$page = $event->arguments(0);
 	if(!$page instanceof Page) return;
 	if((string)$page->template !== 'repeater_spl_purchases') return;
-
+    if($page->meta('mc_synced_at')) return;
+	
 	$this->syncPurchaseToMailchimp($page);
-  }
+    }
 
   /**
    * Core sync routine:
@@ -110,6 +241,8 @@ class StripePlMailchimpSync extends WireData implements Module, ConfigurableModu
    */
   protected function syncPurchaseToMailchimp(Page $item): void {
 	try {
+	if ($item->meta('mc_synced_at')) return;
+		
 	  // Get owning user (repeater item → getForPage())
 	  if(!method_exists($item, 'getForPage')) return;
 	  $user = $item->getForPage();
@@ -129,6 +262,10 @@ class StripePlMailchimpSync extends WireData implements Module, ConfigurableModu
 	  if(!$tags) return;
 
 	  $this->subscribeToMailchimp($email, $tags, $first, $last);
+	  
+	 // Mark as synced (meta) and persist WITHOUT re-saving the page
+	  $item->meta('mc_synced_at', time());
+	  $item->save('meta');
 
 	  // Logging (human-readable)
 	  $this->wire('log')->save(
@@ -197,8 +334,10 @@ class StripePlMailchimpSync extends WireData implements Module, ConfigurableModu
   protected function subscribeToMailchimp(string $email, array $tags, string $first, string $last): void {
 	$apiKey = (string) $this->mailchimpApiKey;
 	$audId  = (string) $this->mailchimpAudienceId;
-	if($apiKey === '' || $audId === '' || $email === '') return;
-
+	if ($apiKey === '' || $audId === '' || strpos($apiKey, '-') === false) {
+	  $this->wire('log')->save('spl_mailchimp', 'Mailchimp config invalid or incomplete.');
+	  return;
+	}
 	// Derive datacenter ("usX") from key suffix
 	$dc   = substr(strrchr($apiKey, '-'), 1);
 	$hash = md5(strtolower($email));
@@ -235,7 +374,7 @@ class StripePlMailchimpSync extends WireData implements Module, ConfigurableModu
 	curl_setopt_array($ch, [
 	  CURLOPT_USERPWD       => 'user:' . $apiKey,
 	  CURLOPT_RETURNTRANSFER=> true,
-	  CURLOPT_TIMEOUT       => 10,
+	  CURLOPT_TIMEOUT       => 20,
 	  CURLOPT_CUSTOMREQUEST => $method,
 	  CURLOPT_HTTPHEADER    => ['Content-Type: application/json'],
 	  CURLOPT_POSTFIELDS    => json_encode($data),
