@@ -140,15 +140,6 @@ class StripePlMailchimpSync extends WireData implements Module, ConfigurableModu
 	  
 	return $inputfields;
   }
-
-private function parseDateYmd($s): ?int {
-	  if ($s === null) return null;
-	  if (is_int($s)) return $s;
-	  $s = trim((string)$s);
-	  if ($s === '') return null;
-	  $ts = strtotime($s);
-	  return $ts !== false ? $ts : null;
-  }
     
 protected function triggerResyncFromConfig(array $data): void {
 	if (empty($data['resyncRun'])) return;
@@ -165,50 +156,75 @@ protected function triggerResyncFromConfig(array $data): void {
 	$pages = $this->wire('pages');
 	$sel = "template=repeater_spl_purchases, limit=1000";
 
-	if ($from) $sel .= ", purchase_date|created>={$from}";
-	if ($to)   $sel .= ", purchase_date|created<={$to}";
+	if ($from) $sel .= ", purchase_date>={$from}";
+	if ($to)   $sel .= ", purchase_date<={$to}";
   
 	$items = $pages->find($sel);
-  
-	// Debug visibility
-	$this->wire('log')->save('spl_mailchimp', "resync: found {$items->count()} items for selector: {$sel}");
+    // ===== Detailed report buffer (header) =====
+	$r = [];
+	$r[] = '== StripePaymentLinks Mailchimp Resync ==';
+	$r[] = 'Mode: ' . ($dryRun ? 'DRY RUN (no writes)' : 'WRITE');
+	$r[] = 'Only unsynced: ' . ($unsyncedOnly ? 'yes' : 'no');
+	$r[] = 'From: ' . ($from ? date('Y-m-d', $from) : '—');
+	$r[] = 'To:   ' . ($to   ? date('Y-m-d', $to)   : '—');
+	$r[] = 'Selector: ' . $sel;
+	$r[] = '';
   
 	$synced = 0; $skipped = 0; $errors = 0; $wouldSync = 0;
   
 	foreach ($items as $it) {
 	  /** @var Page $it */
 	  $already = (bool) $it->meta('mc_synced_at');
-  
+  		$whenTs = (int)($it->get('purchase_date') ?: $it->created);
+  		$when   = $whenTs ? date('Y-m-d H:i', $whenTs) : '-';
+  		
+  		// Owner/User ermitteln
+		  $owner = method_exists($it, 'getForPage') ? $it->getForPage() : null;
+		  $email = ($owner instanceof \ProcessWire\User) ? (string) $owner->email : '';
+  		
+  		// Tags ermitteln
+  		$tagsArr = $this->purchaseTagsFromItem($it);
+  		$tags    = $tagsArr ? implode(', ', $tagsArr) : '';
+		  
 	  if ($dryRun) {
 		// Count what WOULD be synced given current flags
 		if ($unsyncedOnly && $already) {
 		  $skipped++;
+		  $r[] = sprintf('%s  #%d  %s  [SKIP already synced]', $when, (int)$it->id, $email ?: '(no email)');
 		} else {
 		  $wouldSync++;
-		  $this->wire('log')->save('spl_mailchimp', "[dry-run] would sync item #{$it->id}");
+		  $r[] = sprintf('%s  #%d  %s  ⇒ DRY would sync  | tags: %s', $when, (int)$it->id, $email ?: '(no email)', $tags);
 		}
 		continue;
 	  }
   
-	  if ($unsyncedOnly && $already) { $skipped++; continue; }
-  
+	  if ($unsyncedOnly && $already) { 
+		  $skipped++;
+		  $r[] = sprintf('%s  #%d  %s  [SKIP already synced]', $when, (int)$it->id, $email ?: '(no email)');
+ 		 continue; 
+	  }
 	  try {
 		$this->syncPurchaseToMailchimp($it);
 		$synced++;
+		$r[] = sprintf('%s  #%d  %s  ⇒ SYNCED         | tags: %s', $when, (int)$it->id, $email ?: '(no email)', $tags);
 	  } catch (\Throwable $e) {
 		$errors++;
-		$this->wire('log')->save('spl_mailchimp', "[resync error] item #{$it->id}: " . $e->getMessage());
+	    $r[] = sprintf('%s  #%d  %s  [ERROR] %s', $when, (int)$it->id, $email ?: '(no email)', $e->getMessage());
 	  }
 	}
-  
-  	$fmt = fn($ts) => $ts ? date('Y-m-d H:i:s', $ts) . ' (' . $ts . ')' : '-';
 	
-	$this->wire('session')->set('spl_mailchimp_resync_report', sprintf(
-	  "Resync finished: synced=%d, skipped=%d, errors=%d, wouldSync=%d (from=%s, to=%s, unsyncedOnly=%s, dryRun=%s)",
-	  $synced, $skipped, $errors, $wouldSync,
-	  $fmt($from), $fmt($to),
-	  $unsyncedOnly ? 'on':'off', $dryRun ? 'on':'off'
-	));
+  // Footer + totals
+	  $fmt = fn($ts) => $ts ? date('Y-m-d H:i:s', $ts) . ' (' . $ts . ')' : '-';
+	  $r[] = '';
+	  $r[] = 'Totals:'
+		   . ' synced=' . $synced
+		   . ', skipped=' . $skipped
+		   . ', errors=' . $errors
+		   . ($dryRun ? (', wouldSync=' . $wouldSync) : '');
+	  $r[] = sprintf('Range: from=%s, to=%s', $fmt($from), $fmt($to));
+	
+	  // Hand result to the config form's markup field
+	  $this->wire('session')->set('spl_mailchimp_resync_report', implode("\n", $r));
 	
 	$data['resyncRun'] = false;
 	$this->modules->saveConfig('StripePlMailchimpSync', $data);
