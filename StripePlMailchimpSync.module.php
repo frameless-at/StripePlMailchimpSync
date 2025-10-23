@@ -31,7 +31,7 @@ class StripePlMailchimpSync extends WireData implements Module, ConfigurableModu
   public static function getModuleInfo(): array {
 	return [
 	  'title'       => 'StripePaymentLinks Mailchimp Sync',
-	  'version'     => '0.1.0',
+	  'version'     => '0.2.0',
 	  'summary'     => 'Sync purchases from StripePaymentLinks to Mailchimp',
 	  'author'      => 'frameless Media',
 	  'autoload'    => true,
