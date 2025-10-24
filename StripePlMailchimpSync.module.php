@@ -31,7 +31,7 @@ class StripePlMailchimpSync extends WireData implements Module, ConfigurableModu
   public static function getModuleInfo(): array {
 	return [
 	  'title'       => 'StripePaymentLinks Mailchimp Sync',
-	  'version'     => '0.2.0',
+	  'version'     => '0.2.1',
 	  'summary'     => 'Sync purchases from StripePaymentLinks to Mailchimp',
 	  'author'      => 'frameless Media',
 	  'autoload'    => true,
@@ -256,7 +256,8 @@ class StripePlMailchimpSync extends WireData implements Module, ConfigurableModu
 		  }
   
 		  try {
-			  $this->syncPurchaseToMailchimp($it);
+			  $force = !$unsyncedOnly;
+			  $this->syncPurchaseToMailchimp($it, $force);
 			  $synced++;
 			  $r[] = sprintf('%s  #%d  %s  ⇒ SYNCED         | tags: %s', $when, (int)$it->id, $ownerEmail ?: '(no email)', $tags);
 		  } catch (\Throwable $e) {
@@ -307,9 +308,9 @@ class StripePlMailchimpSync extends WireData implements Module, ConfigurableModu
    * @param Page $item Repeater item page (purchase)
    * @return void
    */
-  protected function syncPurchaseToMailchimp(Page $item): void {
+   protected function syncPurchaseToMailchimp(Page $item, bool $force = false): void {
 	try {
-	if ($item->meta('mc_synced_at')) return;
+	if ($item->meta('mc_synced_at') && !$force) return;
 		
 	  // Get owning user (repeater item → getForPage())
 	  if(!method_exists($item, 'getForPage')) return;
